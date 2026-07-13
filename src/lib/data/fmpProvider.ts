@@ -109,7 +109,10 @@ export class FmpProvider implements FinancialDataProvider {
     if (res.status === 401 || res.status === 403) {
       throw new Error("Financial data provider rejected the API key. Check FINANCIAL_API_KEY.");
     }
-    if (!res.ok) throw new Error(`Data provider error ${res.status} for ${path}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Data provider error ${res.status} for ${path}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+    }
     return res.json() as Promise<T>;
   }
 
@@ -256,7 +259,7 @@ export class FmpProvider implements FinancialDataProvider {
   }
 
   async listCompanies(filters?: SearchFilters): Promise<CompanyProfile[]> {
-    let tickers: string[];
+    let list: CompanyProfile[];
 
     if (filters?.query && filters.query.trim().length > 0) {
       const q = encodeURIComponent(filters.query.trim());
@@ -264,21 +267,25 @@ export class FmpProvider implements FinancialDataProvider {
         this.fetchJson<FmpSearchHit[]>(`/search-name?query=${q}&limit=10`).catch(() => []),
         this.fetchJson<FmpSearchHit[]>(`/search-symbol?query=${q}&limit=10`).catch(() => []),
       ]);
-      tickers = Array.from(new Set([...byName, ...bySymbol].map((h) => h.symbol))).slice(0, 15);
+      const tickers = Array.from(new Set([...byName, ...bySymbol].map((h) => h.symbol))).slice(0, 15);
+      const profiles = await this.pool(tickers, 5, async (t) => {
+        try {
+          const p = await this.fetchJson<FmpProfile[]>(`/profile?symbol=${t}`);
+          return p?.[0] ? this.mapProfile(p[0]) : null;
+        } catch {
+          return null; // skip tickers that fail rather than fail the whole search
+        }
+      });
+      list = profiles.filter((p): p is CompanyProfile => p != null);
     } else {
-      tickers = SEED_TICKERS;
+      // Browsing the seed universe: reuse getAll() instead of issuing separate
+      // profile-only requests. Both paths now hit identical URLs, so Next's
+      // fetch cache (revalidate: 3600) deduplicates them and a cold page load
+      // costs one scoring pass (~36 requests), not a scoring pass + a listing
+      // pass (~48). Critical on FMP's 250/day free tier.
+      const records = await this.getAll();
+      list = records.map((r) => r.profile);
     }
-
-    const profiles = await this.pool(tickers, 5, async (t) => {
-      try {
-        const p = await this.fetchJson<FmpProfile[]>(`/profile?symbol=${t}`);
-        return p?.[0] ? this.mapProfile(p[0]) : null;
-      } catch {
-        return null; // skip tickers that fail rather than fail the whole search
-      }
-    });
-
-    let list = profiles.filter((p): p is CompanyProfile => p != null);
 
     if (filters?.sector) list = list.filter((p) => p.sector === filters.sector);
     if (filters?.industry) list = list.filter((p) => p.industry === filters.industry);
@@ -300,16 +307,33 @@ export class FmpProvider implements FinancialDataProvider {
   async getAll(): Promise<CompanyRecord[]> {
     // Bounded to the seed list — see class docstring. 3 requests/company
     // (no quarterly TTM) to fit comfortably inside free-tier daily quota;
-    // concurrency-limited, and cached for hours by the caller (see
-    // src/lib/data/index.ts) so this whole batch runs at most a few times a day.
+    // cached for hours by the caller (see src/lib/data/index.ts) so this
+    // whole batch runs at most a few times a day.
+    const errors: string[] = [];
     const records = await this.pool(SEED_TICKERS, SEED_TICKERS.length, async (t) => {
       try {
         return await this.fetchRecord(t, { withQuarterlyTtm: false });
-      } catch {
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push(`${t}: ${msg}`);
+        console.error(`[fmp] failed to fetch ${t}: ${msg}`); // visible in host function logs
         return null; // one bad ticker shouldn't take down the whole universe
       }
     });
-    return records.filter((r): r is CompanyRecord => r != null);
+    const ok = records.filter((r): r is CompanyRecord => r != null);
+    if (ok.length === 0) {
+      // Every ticker failed — almost certainly quota/auth/plan-level, not a
+      // per-company fluke. Surface the real reason instead of silently
+      // returning an empty universe (which renders as blank scores).
+      throw new Error(
+        `Financial data provider returned no data. First error: ${errors[0] ?? "unknown"}. ` +
+          `This usually means the daily API quota is exhausted or the API key/plan doesn't cover these endpoints.`
+      );
+    }
+    if (errors.length > 0) {
+      console.warn(`[fmp] ${errors.length}/${SEED_TICKERS.length} tickers failed: ${errors.join(" | ")}`);
+    }
+    return ok;
   }
 
   async getFxRates(): Promise<FxRates> {
