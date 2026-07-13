@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: "Bricolage Grotesque";
+  --font-body: "Archivo";
+  --font-mono: "IBM Plex Mono";
+  /* dark research-terminal palette (default) */
+  --bg: 11 16 23;        /* #0B1017 deep ink */
+  --panel: 18 25 35;     /* #121923 */
+  --panel2: 24 33 46;    /* #18212E */
+  --line: 39 51 68;      /* #273344 */
+  --ink: 231 237 243;    /* #E7EDF3 */
+  --muted: 138 151 168;  /* #8A97A8 */
+  --accent: 110 139 255; /* #6E8BFF indigo — interactive */
+  --brass: 217 164 65;   /* #D9A441 — reserved for overall score */
+  --good: 47 191 143;    /* #2FBF8F improving */
+  --bad: 229 84 92;      /* #E5545C deteriorating */
+}
+.light {
+  --bg: 244 246 248;
+  --panel: 255 255 255;
+  --panel2: 240 243 246;
+  --line: 220 227 234;
+  --ink: 22 32 44;
+  --muted: 96 110 128;
+  --accent: 62 92 214;
+  --brass: 164 118 24;
+  --good: 16 145 104;
+  --bad: 200 55 66;
+}
+
+html { color-scheme: dark; }
+html.light { color-scheme: light; }
+
+body {
+  @apply bg-bg text-ink font-body antialiased;
+}
+
+.num { @apply font-mono tabular-nums; }
+
+.card { @apply rounded-xl border border-line bg-panel; }
+
+.eyebrow {
+  @apply text-[11px] uppercase tracking-[0.14em] text-muted font-medium;
+}
+
+::selection { background: rgb(var(--accent) / 0.35); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* thin scrollbars for tables */
+.scroll-x { overflow-x: auto; scrollbar-width: thin; }
