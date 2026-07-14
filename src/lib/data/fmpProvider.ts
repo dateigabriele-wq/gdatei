@@ -83,7 +83,7 @@ export class FmpProvider implements FinancialDataProvider {
 
   constructor(private apiKey: string) {}
 
-  private async fetchJson<T>(path: string, retries = 1, timeoutMs = 6000): Promise<T> {
+  private async fetchJson<T>(path: string, retries = 2, timeoutMs = 6000): Promise<T> {
     const url = `${this.base}${path}${path.includes("?") ? "&" : "?"}apikey=${this.apiKey}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -101,9 +101,11 @@ export class FmpProvider implements FinancialDataProvider {
     }
     clearTimeout(timer);
     if (res.status === 429 && retries > 0) {
-      // rate-limit handling: short backoff then retry (kept brief so we stay
-      // well inside the serverless function's execution time budget)
-      await new Promise((r) => setTimeout(r, 800));
+      // rate-limit handling: short backoff with jitter, then retry (kept
+      // brief so we stay well inside the serverless function's execution
+      // time budget; jitter avoids every concurrent request retrying at
+      // the exact same instant and re-tripping the burst limit)
+      await new Promise((r) => setTimeout(r, 600 + Math.random() * 700));
       return this.fetchJson<T>(path, retries - 1, timeoutMs);
     }
     if (res.status === 401 || res.status === 403) {
@@ -117,10 +119,11 @@ export class FmpProvider implements FinancialDataProvider {
   }
 
   /** Run async jobs with limited concurrency so we don't burst past rate limits. */
-  private async pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  private async pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>, staggerMs = 0): Promise<R[]> {
     const results: R[] = new Array(items.length);
     let cursor = 0;
-    const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    const workers = new Array(Math.min(limit, items.length)).fill(0).map(async (_, workerIndex) => {
+      if (staggerMs > 0) await new Promise((r) => setTimeout(r, workerIndex * staggerMs));
       while (cursor < items.length) {
         const i = cursor++;
         results[i] = await fn(items[i]);
@@ -309,17 +312,28 @@ export class FmpProvider implements FinancialDataProvider {
     // (no quarterly TTM) to fit comfortably inside free-tier daily quota;
     // cached for hours by the caller (see src/lib/data/index.ts) so this
     // whole batch runs at most a few times a day.
+    //
+    // Concurrency is capped (not "all at once") and workers are staggered:
+    // FMP's free tier enforces a burst/rate limit separate from the daily
+    // quota, and firing all 12 companies' requests simultaneously (36 calls
+    // at once) can trip it even with plenty of daily quota left, silently
+    // dropping whichever tickers got rate-limited.
     const errors: string[] = [];
-    const records = await this.pool(SEED_TICKERS, SEED_TICKERS.length, async (t) => {
-      try {
-        return await this.fetchRecord(t, { withQuarterlyTtm: false });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        errors.push(`${t}: ${msg}`);
-        console.error(`[fmp] failed to fetch ${t}: ${msg}`); // visible in host function logs
-        return null; // one bad ticker shouldn't take down the whole universe
-      }
-    });
+    const records = await this.pool(
+      SEED_TICKERS,
+      4,
+      async (t) => {
+        try {
+          return await this.fetchRecord(t, { withQuarterlyTtm: false });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`${t}: ${msg}`);
+          console.error(`[fmp] failed to fetch ${t}: ${msg}`); // visible in host function logs
+          return null; // one bad ticker shouldn't take down the whole universe
+        }
+      },
+      250 // ms stagger between each of the 4 workers' start times
+    );
     const ok = records.filter((r): r is CompanyRecord => r != null);
     if (ok.length === 0) {
       // Every ticker failed — almost certainly quota/auth/plan-level, not a
