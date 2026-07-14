@@ -220,8 +220,8 @@ export class FmpProvider implements FinancialDataProvider {
   private async fetchRecord(ticker: string, opts: { withQuarterlyTtm: boolean }): Promise<CompanyRecord | null> {
     const base = [
       this.fetchJson<FmpProfile[]>(`/profile?symbol=${ticker}`),
-      this.fetchJson<FmpIncomeStatement[]>(`/income-statement?symbol=${ticker}&limit=6`),
-      this.fetchJson<FmpCashFlowStatement[]>(`/cash-flow-statement?symbol=${ticker}&limit=6`),
+      this.fetchJson<FmpIncomeStatement[]>(`/income-statement?symbol=${ticker}&limit=5`),
+      this.fetchJson<FmpCashFlowStatement[]>(`/cash-flow-statement?symbol=${ticker}&limit=5`),
     ] as const;
 
     const [profiles, annualIncome, annualCash] = await Promise.all(base);
